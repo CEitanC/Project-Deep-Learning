@@ -12,32 +12,34 @@ import numpy as np
 
 
 def new_alg_comp(params: List[Tensor],
-        d_p_list: List[Tensor],
+        d_p_list: List[Tensor], mt,
         *,
-        lr: float):
+        lr: float, t):
     
+    beta1 = 0.999
     g_norm_sq = 0
+    epsilon = 0
+    mt_new = mt
+    g_l_norm_sq_list = np.zeros(4)
+    mhat_list = np.zeros(4)
+
     for i in d_p_list:
         g_norm_sq += torch.norm(i, p='fro')**2
 
     for i, param in enumerate(params):
-        """
-        d_p = d_p_list[i]
-
-        alpha = -lr
-        f_norm_sq = (torch.norm(param.grad, p='fro'))**2
-        a_l = g_norm/f_norm_sq
-        if f_norm_sq != 0:
-            param.add_(a_l*d_p, alpha=alpha)
-        """
         g_l = d_p_list[i]
+        mt_i = mt[i]
         alpha = -lr
         g_l_norm_sq = (torch.norm(g_l, p='fro'))**2
-        if g_l_norm_sq != 0:
-            delta = (g_norm_sq/g_l_norm_sq)*g_l
-            param.add_(delta, alpha=alpha)
+        g_l_norm_sq_list[i] = g_l_norm_sq
+        mt_i_new = beta1*mt_i + (1-beta1)*g_l_norm_sq
+        mt_new[i] = mt_i_new
+        mt_hat = mt_i_new/(1-beta1**t)
+        mhat_list[i] = mt_hat
+        delta = (g_norm_sq/(mt_hat + epsilon))*g_l
+        param.add_(delta, alpha=alpha)
         
-    return math.sqrt(g_norm_sq)
+    return math.sqrt(g_norm_sq), mt, g_l_norm_sq_list, mhat_list
 
 
 
@@ -52,8 +54,7 @@ from collections import defaultdict, abc as container_abcs
 
 class new_alg(Optimizer):
     
-    def __init__(self, params, lr=required, momentum=0, dampening=0,
-                 weight_decay=0, nesterov=False, *, maximize=False):
+    def __init__(self, params, lr=required, momentum=0, dampening=0, weight_decay=0, nesterov=False, *, maximize=False):
         if lr is not required and lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if momentum < 0.0:
@@ -66,6 +67,8 @@ class new_alg(Optimizer):
         if nesterov and (momentum <= 0 or dampening != 0):
             raise ValueError("Nesterov momentum requires a momentum and zero dampening")
         super(new_alg, self).__init__(params, defaults)
+        self.t = 0
+        self.mt = [0, 0, 0, 0]
 
     def __setstate__(self, state):
         super(new_alg, self).__setstate__(state)
@@ -80,13 +83,11 @@ class new_alg(Optimizer):
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
+        self.t += 1
         loss = None
         if closure is not None:
             with torch.enable_grad():
                 loss = closure()
-
-#        for group in self.param_groups:
-#            g_norm = 0
 
         for group in self.param_groups:
             params_with_grad = []
@@ -111,7 +112,8 @@ class new_alg(Optimizer):
                         momentum_buffer_list.append(state['momentum_buffer'])
 
             
-            g_norm = new_alg_comp(params_with_grad, d_p_list, lr=lr)
+            g_norm, mt_new, g_l_norm_sq_list, mhat_list = new_alg_comp(params_with_grad, d_p_list, self.mt, lr=lr, t=self.t)
+            self.mt = mt_new
             
             #F.sgd(params_with_grad, d_p_list, momentum_buffer_list, weight_decay=weight_decay, momentum=momentum, lr=lr, dampening=dampening, nesterov=nesterov, maximize=maximize,)
 
@@ -120,7 +122,7 @@ class new_alg(Optimizer):
                 state = self.state[p]
                 state['momentum_buffer'] = momentum_buffer
 
-        return loss, g_norm
+        return loss, g_norm, g_l_norm_sq_list, mhat_list
 
     def zero_grad(self, set_to_none: bool = False):
         r"""Sets the gradients of all optimized :class:`torch.Tensor` s to zero.
